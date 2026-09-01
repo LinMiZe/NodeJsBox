@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NodeJsBox 应用图标：深青底 + 白色 Node 六边形 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#0F766E"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,26 L67,33.5 L67,48.5 L54,56 L41,48.5 L41,33.5 Z" />
+    <path
+        android:fillColor="#5EEAD4"
+        android:pathData="M30,44 L41,50.5 L41,63.5 L30,70 L19,63.5 L19,50.5 Z" />
+    <path
+        android:fillColor="#5EEAD4"
+        android:pathData="M78,44 L89,50.5 L89,63.5 L78,70 L67,63.5 L67,50.5 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,62 L65,68.5 L65,81.5 L54,88 L43,81.5 L43,68.5 Z" />
+</vector>

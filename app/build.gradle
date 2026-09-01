@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.nodejsbox.container'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.nodejsbox.container"
+        minSdk 26
+        targetSdk 35
+        versionCode 2
+        versionName "0.2.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packaging {
+        jniLibs {
+            // 关键：让安装器把 jniLibs 解压到 nativeLibraryDir 落盘，
+            // ProcessBuilder 才能 exec libnode.so（W^X 策略只允许执行该目录）
+            useLegacyPackaging = true
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+}

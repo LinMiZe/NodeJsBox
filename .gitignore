@@ -1,0 +1,18 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# Kotlin incremental compilation cache (Kotlin 2.x)
+.kotlin/
+
+# Runtime source packages & extraction artifacts
+# (regenerate with: node tools/fetch-termux-deps.cjs + node tools/assemble-runtime.cjs)
+_runtime_src/
+app/src/main/jniLibs/
+
+# IDE
+.idea/
+.vscode/
+*.iml
