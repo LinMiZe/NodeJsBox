@@ -30,6 +30,8 @@ object NodeRuntime {
      *   args      传给 node 的命令行参数
      *   env       附加环境变量（覆盖 baseEnv）
      *   restart   进程退出后是否自动重启（指数退避 1s→60s）
+     *   cwd       进程工作目录（null=filesDir）；终端「当前目录」经此下传，
+     *             使相对路径、node 脚本参数、sh 内建 pwd 都按该目录解析
      */
     data class Config(
         val id: String,
@@ -39,6 +41,7 @@ object NodeRuntime {
         val env: Map<String, String> = emptyMap(),
         val restart: Boolean = false,
         val cmd: String? = null,
+        val cwd: File? = null,
     )
 
     /** node 可执行文件（安装后位于 nativeLibraryDir） */
@@ -66,7 +69,7 @@ object NodeRuntime {
         if (script.startsWith("/")) File(script) else File(context.filesDir, script)
 
     /**
-     * 按运行配置 spawn 一个进程（stdout/stderr 已合并，cwd=filesDir）。
+     * 按运行配置 spawn 一个进程（stdout/stderr 已合并，cwd=config.cwd ?: filesDir）。
      * - config.cmd 非空：执行单行命令。首 token 为 `node` 时直接 exec node（**不经 sh**——
      *   否则 SIGTERM/SIGINT 会发给 sh，依赖其转发，node 收不到信号且退出码错乱）；
      *   其余系统命令（可能含 shell 语法）仍交给 /system/bin/sh -c。
@@ -94,7 +97,7 @@ object NodeRuntime {
 
         val pb = ProcessBuilder(cmdList)
         pb.redirectErrorStream(true)
-        pb.directory(context.filesDir)
+        pb.directory(config.cwd ?: context.filesDir)
         val env = pb.environment()
         for ((k, v) in baseEnv(context)) env[k] = v
         for ((k, v) in BridgeServer.envForSpawn()) env[k] = v

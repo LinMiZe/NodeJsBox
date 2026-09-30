@@ -36,9 +36,9 @@ import java.util.concurrent.atomic.AtomicLong
  *         {"event":"exit","id":"...","code":0}              进程退出
  *
  * 命令一览（args 省略 = 空对象）：
- *   shell.run   {cmd}                → {id,pid}   远程 shell：/system/bin/sh -c 执行，动态实例 dyn-sh-*
+ *   shell.run   {cmd,cwd?}           → {id,pid}   远程 shell：/system/bin/sh -c 执行（cwd 相对 files/，默认 filesDir），动态实例 dyn-sh-*
  *   proc.list   {}                   → {instances:[info…]}（含 pid）
- *   proc.attach {ids:[id] 或 id, tail?=200} → {targets:[{id,lines:[…]}]} 订阅流式输出（可多目标，先补历史尾部）
+ *   proc.attach {ids:[id] 或 id, tail?=200} → {targets:[{id,lines,exited?,exitCode?}]} 订阅流式输出（可多目标，先补历史尾部；attach 时进程已退出则回 exited=true 补终结事件）
  *   proc.detach {ids:[id] 或 id}      → {ok:true}   取消订阅（未传 ids = 清空本连接全部订阅）
  *   proc.input  {id,text,newline?=true} → 写入进程 stdin
  *   proc.kill   {id}                 → SIGTERM（3s 兜底强杀），同 UI 停止
@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicLong
  *   fs.mkdir    {path}               → {ok:true}
  *   fs.delete   {path}               → {ok:true}（仅文件 / 空目录）
  *   fs.rename   {from,to}            → {ok:true}
+ *   licenses.read {name}             → {name,title,content}（name: notices.txt | node-LICENSE.txt；读 assets/licenses/，内存缓存）
  *
  * 安全边界：路径一律限定在 app 沙箱（/data/data/<pkg>）内，拒绝 .. 越界；仅回环地址监听。
  * 线程模型：accept 一线程、每连接一线程；流式事件由 RuntimeManager.LineListener
@@ -71,8 +72,13 @@ object WebServer {
 
     private const val WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+    /** 进程退出的日志标记行（RuntimeManager.pump 写入）：`---- 进程退出 code=N ----` */
+    private val EXIT_MARKER_REGEX = Regex("----\\s*进程退出\\s*code\\s*=\\s*(-?\\d+)")
+
     @Volatile private var server: ServerSocket? = null
     @Volatile private var webIndexHtml: String = ""
+    /** 开源许可文本：name → 内容（首次读取时从 assets/licenses/ 进内存并缓存） */
+    private val licenseTexts = ConcurrentHashMap<String, String>()
     private val running = AtomicBoolean(false)
     private val sessions = CopyOnWriteArraySet<Session>()
     private val connCounter = AtomicLong()
@@ -80,6 +86,22 @@ object WebServer {
 
     val isRunning: Boolean get() = running.get()
     val port: Int get() = server?.localPort ?: -1
+
+    /** 内置许可条目（name → 展示标题），原生弹窗与 H5 控制台共用，避免两处硬编码漂移 */
+    val LICENSE_ITEMS: List<Pair<String, String>> = listOf(
+        "notices.txt" to "内置运行时 · 来源与许可告知（Termux 构建的 Node.js 及各依赖）",
+        "node-LICENSE.txt" to "Node.js LICENSE（含其自带的 V8 / libuv / zlib 等第三方组件全文）",
+    )
+
+    /** 读一条许可文本（assets/licenses/，首次读取后缓存；缺失返回提示行而不抛） */
+    fun licenseText(context: Context, name: String): String {
+        licenseTexts[name]?.let { return it }
+        val ctx = context.applicationContext
+        Diag.init(ctx)
+        val text = readAssetText(ctx, "licenses/$name").ifEmpty { "（未打包 licenses/$name）" }
+        licenseTexts[name] = text
+        return text
+    }
 
     /** 一条 WebSocket 连接：写锁 + 已订阅流式输出的实例 id 集合 */
     internal class Session(val socket: Socket) {
@@ -121,6 +143,15 @@ object WebServer {
             Diag.warn("[web] 启动失败: ${e.message}")
             running.set(false)
         }
+    }
+
+    /** assets 文本读取（失败返回空串并留痕，不抛异常——许可入口属非关键路径） */
+    private fun readAssetText(ctx: Context, assetPath: String): String = try {
+        ctx.assets.open(assetPath).use { it.readBytes().toString(Charsets.UTF_8) }
+    } catch (e: Exception) {
+        Log.e(TAG, "读取 assets/$assetPath 失败: ${e.message}")
+        Diag.warn("[web] assets/$assetPath 读取失败: ${e.message}")
+        ""
     }
 
     @Synchronized
@@ -329,6 +360,7 @@ object WebServer {
             "fs.mkdir" -> fsMkdir(ctx, args)
             "fs.delete" -> fsDelete(ctx, args)
             "fs.rename" -> fsRename(ctx, args)
+            "licenses.read" -> licensesRead(ctx, args)
             "ping" -> JSONObject().put("pong", System.currentTimeMillis())
             else -> throw IllegalArgumentException("未知命令: $cmd")
         }
@@ -345,6 +377,7 @@ object WebServer {
         val raw = args.optString("cmd").trim()
         if (raw.isEmpty()) throw IllegalArgumentException("缺少 cmd")
         val cmd = rewriteShellCommand(ctx, raw)
+        val cwd = resolveCwd(ctx, args.optString("cwd").trim())
         val id = RuntimeManager.DYNAMIC_PREFIX + "sh-" +
             System.currentTimeMillis().toString(36) + "-" +
             (100 + (Math.random() * 900)).toInt()
@@ -358,6 +391,7 @@ object WebServer {
             script = "",
             cmd = cmd,
             env = env,
+            cwd = cwd,
         )
         if (!RuntimeManager.startWithConfig(ctx, cfg)) throw IOException("进程启动失败")
         // pump 线程 spawn 有极短延迟：稍等再取 pid（最多 ~200ms）
@@ -365,6 +399,17 @@ object WebServer {
         var waited = 0
         while (waited < 10 && pid == null) { pid = RuntimeManager.pidOf(id); if (pid == null) { Thread.sleep(20); waited++ } }
         return JSONObject().put("id", id).put("pid", pid ?: JSONObject.NULL)
+    }
+
+    /**
+     * 终端工作目录解析（安全边界）：空串/"." = filesDir（= HOME）；
+     * 其余按相对 files/ 经 resolveSandboxPath 解析（越出沙箱抛 SecurityException），且必须已存在为目录。
+     */
+    private fun resolveCwd(ctx: Context, cwdRel: String): File {
+        if (cwdRel.isEmpty() || cwdRel == ".") return ctx.filesDir.canonicalFile
+        val dir = resolveSandboxPath(ctx, cwdRel)
+        if (!dir.isDirectory) throw IllegalArgumentException("工作目录不存在: files/$cwdRel")
+        return dir
     }
 
     /**
@@ -398,16 +443,36 @@ object WebServer {
         return JSONObject().put("instances", arr)
     }
 
-    /** 订阅：同一条连接可同时盯多个实例（常驻终端/观察终端各自订阅互不干扰） */
+    /** 订阅：同一条连接可同时盯多个实例（常驻终端/观察终端各自订阅互不干扰）。
+     *  竞态补偿：瞬间退出的命令,其 exit 事件可能在客户端订阅登记前就广播完（且非 restart
+     *  实例退出后会立即从 RuntimeManager 移除）→ 前端既等不到事件、也查不到活实例。
+     *  因此退出判定回退到日志尾部的退出标记（日志文件持久,每个 id 一份）,并照常回放历史行,
+     *  保证「不报错 / 无输出 / 卡住后续命令」不再发生。 */
     private fun procAttach(session: Session, ctx: Context, args: JSONObject): JSONObject {
         val ids = argIds(args).ifEmpty { throw IllegalArgumentException("缺少 id/ids") }
         val tail = args.optInt("tail", 200).coerceIn(0, 2000)
         val targets = JSONArray()
         for (id in ids) {
             session.subscribed.add(id)
+            val logLines = RuntimeManager.tailLog(ctx, id, tail.coerceAtLeast(1))
             val lines = JSONArray()
-            RuntimeManager.tailLog(ctx, id, tail)?.forEach { lines.put(it) }
-            targets.put(JSONObject().put("id", id).put("lines", lines))
+            logLines?.forEach { lines.put(it) }
+            val target = JSONObject().put("id", id).put("lines", lines)
+
+            // 退出判定三态：活实例且 process==null → 刚退出；活实例且进程在 → 未退出（交实时事件）；
+            // 实例已移除 → 回退日志尾部退出标记
+            val inst = RuntimeManager.instance(id)
+            var exited = false
+            var code: Int? = null
+            when {
+                inst != null -> if (inst.process == null) { exited = true; code = inst.lastExitCode }
+                else -> {
+                    val marker = logLines?.lastOrNull { EXIT_MARKER_REGEX.containsMatchIn(it) }
+                    if (marker != null) { exited = true; code = EXIT_MARKER_REGEX.find(marker)?.groupValues?.get(1)?.toIntOrNull() }
+                }
+            }
+            if (exited) target.put("exited", true).put("exitCode", code ?: -1)
+            targets.put(target)
         }
         return JSONObject().put("targets", targets)
     }
@@ -568,5 +633,15 @@ object WebServer {
         if (to.exists()) throw IllegalArgumentException("目标已存在: ${args.optString("to")}")
         if (!from.renameTo(to)) throw IOException("重命名失败")
         return JSONObject().put("ok", true)
+    }
+
+    // ----------------------------- 开源许可（只读 assets，不走沙箱路径解析） -----------------------------
+
+    /** licenses.read {name}：name = notices.txt | node-LICENSE.txt */
+    private fun licensesRead(ctx: Context, args: JSONObject): JSONObject {
+        val name = args.optString("name").trim().ifEmpty { "notices.txt" }
+        val title = LICENSE_ITEMS.firstOrNull { it.first == name }?.second
+            ?: throw IllegalArgumentException("未知许可条目: $name（可选 ${LICENSE_ITEMS.joinToString(" / ") { it.first }}）")
+        return JSONObject().put("name", name).put("title", title).put("content", licenseText(ctx, name))
     }
 }

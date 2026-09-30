@@ -4,7 +4,7 @@
 
 > Run Node.js directly on Android — no Termux / Linux environment required, Node is bundled inside the APK as a container.
 
-NodeJsBox packages **Node.js 24 (native Termux/bionic build)** into the app, forming a self-contained Node runtime container. The app itself is intentionally thin: **the native side has only two buttons (start backend / open web frontend) — all runtime capabilities live in the built-in H5 console**: remote terminal, process management, and file management, all reaching the local WebServer over WebSocket, executed by a unified process engine.
+NodeJsBox packages **Node.js 24 (native Termux/bionic build)** into the app, forming a self-contained Node runtime container. The app itself is intentionally thin: **the native side has only three buttons (start backend / open web frontend / open-source licenses) — all runtime capabilities live in the built-in H5 console**: remote terminal, process management, and file management, all reaching the local WebServer over WebSocket, executed by a unified process engine.
 
 - 📦 **Zero external dependencies**: the Node runtime ships with the APK, dual ABI (arm64-v8a / x86_64), ~73 MB
 - 🖥️ **H5 console**: visit `http://127.0.0.1:38080/` in any browser — terminal / processes / files in one place
@@ -22,13 +22,14 @@ NodeJsBox packages **Node.js 24 (native Termux/bionic build)** into the app, for
 NodeJsBox/
 ├── app/src/main/
 │   ├── java/com/nodejsbox/container/
-│   │   ├── MainActivity / FilePickerActivity      thin entry shell (2 buttons + adb --es run + SAF relay)
+│   │   ├── MainActivity / FilePickerActivity      thin entry shell (3 buttons + adb --es run + SAF relay)
 │   │   ├── core/     NodeRuntime / RuntimeManager / WebServer / BridgeServer
 │   │   │             ContainerBootstrap / ContainerService / Diag
 │   │   ├── bridge/   BridgeDispatcher / ProcCommands / FileCommands (script-side command domains)
 │   │   ├── provider/ FilesDocumentsProvider (expose data directory for browsing)
 │   │   └── ui/       WebPanelActivity (dialog-themed WebView)
 │   ├── assets/       web/index.html (H5 frontend) · scripts/ (bundled scripts) · modules/ (nodejsbox.js)
+│   │                 licenses/ (runtime notices + the full Node.js LICENSE)
 │   └── jniLibs/      node binary + dependent .so files (build artifacts, not committed)
 └── tools/            PC-side build / install / self-test scripts (Node.js, see "Quick Start")
 ```
@@ -93,6 +94,8 @@ Open via the "Open Web Frontend" button on the main screen, or visit `http://127
 - **Persistent terminal**: type a command, press Enter; output streams live; while attached to a process, input goes straight to its stdin
 - **Ephemeral terminal**: attached to one process — replays history output + live stream + interactive input
 
+The header also has an **Open-source licenses** button showing where the bundled runtime comes from plus the full Node.js LICENSE (see "Runtime Provenance & Licenses" below).
+
 WebSocket protocol (one JSON object per line):
 
 ```jsonc
@@ -106,7 +109,7 @@ WebSocket protocol (one JSON object per line):
 {"event":"exit","id":"…","code":0}
 ```
 
-Command domains: `shell.run` / `proc.list` / `proc.attach` / `proc.detach` / `proc.input` / `proc.kill` / `proc.signal` / `fs.list` / `fs.read` / `fs.write` / `fs.mkdir` / `fs.delete` / `fs.rename`.
+Command domains: `shell.run` / `proc.list` / `proc.attach` / `proc.detach` / `proc.input` / `proc.kill` / `proc.signal` / `fs.list` / `fs.read` / `fs.write` / `fs.mkdir` / `fs.delete` / `fs.rename` / `licenses.read`.
 
 > `npm` / `npx` typed in the H5 terminal is automatically rewritten to `node <npm-cli.js> …` (npm ships no binary; run `tools/install-npm.cjs` first).
 
@@ -211,6 +214,31 @@ Key constraints:
 - WebServer: multi-session shared terminal attach, file upload / download (currently limited to 512KB text)
 
 ---
+
+## Runtime Provenance & Licenses
+
+**The bundled Node runtime is neither written nor cross-compiled by this project**: the 10 `.so` files under `app/src/main/jniLibs/<abi>/` come from prebuilt debs in the **official Termux apt repository** (downloaded by `tools/fetch-termux-deps.cjs`, unpacked and renamed to Android naming conventions by `tools/assemble-runtime.cjs` — SONAME only, no code changes).
+
+- apt repository: https://packages.termux.dev/apt/termux-main
+- Termux projects: https://github.com/termux/termux-app · https://github.com/termux/termux-packages
+
+Every component keeps its own upstream license, and **all of them are permissive — no copyleft**:
+
+| .so | Component | Version | License |
+|---|---|---|---|
+| `libnode.so` | Node.js | 24.18.0 | MIT |
+| `libssl3.so` / `libcrypto3.so` | OpenSSL | 3.6.3 | Apache License 2.0 |
+| `libicu*.so` | ICU (Unicode) | 78.3 | Unicode License (BSD-style) |
+| `libz1.so` | zlib | 1.3.2 | zlib License |
+| `libcares.so` | c-ares | 1.34.8 | MIT |
+| `libsqlite3.so` | SQLite | 3.53.4 | Public Domain |
+| `libc++_shared.so` | libc++ (NDK C++ standard library) | 29 | Apache License 2.0 + LLVM Exception |
+
+Notes:
+
+- Third-party components vendored inside Node.js (V8 / libuv / zlib / c-ares / ICU …) are covered by Node's own `LICENSE`, which this project ships verbatim as `app/src/main/assets/licenses/node-LICENSE.txt`.
+- Components not covered by Node's LICENSE (OpenSSL / SQLite / libc++ / c-ares) are distributed under their own licenses listed above. The only obligation of these permissive licenses is **keeping the copyright and license notices**, which is why both the main screen and the H5 console expose an "open-source licenses" entry.
+- The Termux terminal emulator app is published under GPL v3. This project **uses none of its code** — the Termux repository is only the download source for the upstream binaries. The packaging scripts themselves are BSD-3-Clause and are not included either.
 
 ## Contributing
 

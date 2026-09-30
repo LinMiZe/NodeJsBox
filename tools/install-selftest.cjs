@@ -46,7 +46,21 @@ function findProjectRoot(startDir) {
   return path.resolve(startDir);
 }
 const PROJECT_ROOT = findProjectRoot(__dirname);
-const DEFAULT_APK = path.join(PROJECT_ROOT, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
+// debug 产物名受 build.gradle 的 ABI 分包 + outputFileName 影响（nodejsbox-v<版本>-<abi>-debug.apk），
+// 这里从 build.gradle 解析 versionName 拼出默认路径；默认安装 release 包，找不到则回退旧命名 app-debug.apk
+function defaultDebugApk() {
+  const debugDir = path.join(PROJECT_ROOT, 'app', 'build', 'outputs', 'apk', 'release');
+  try {
+    const src = fs.readFileSync(path.join(PROJECT_ROOT, 'app', 'build.gradle'), 'utf8');
+    const vn = /versionName\s+"([^"]+)"/.exec(src);
+    if (vn) {
+      const named = path.join(debugDir, `nodejsbox-v${vn[1]}-all.apk`);
+      if (fs.existsSync(named)) return named;
+    }
+  } catch { /* ignore */ }
+  return path.join(debugDir, 'app-debug.apk');
+}
+const DEFAULT_APK = defaultDebugApk();
 const LOG_TAG = 'NodeJsBox';
 
 const USAGE = `

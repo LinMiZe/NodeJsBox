@@ -4,7 +4,7 @@
 
 > 在 Android 上直接运行 Node.js —— 不依赖 Termux / Linux 环境，把 Node 打进 APK 当容器用。
 
-NodeJsBox 将 Termux 构建的 **Node.js 24（bionic 原生编译）** 打包进 App，形成一个自包含的 Node 运行时容器。App 本体极薄：**原生侧只有两个按钮（启动后端 / 打开 Web 前端），全部运行能力都在内置的 H5 控制台里**——远程终端、进程管理、文件管理，经 WebSocket 打到本机 WebServer，由统一的进程引擎执行。
+NodeJsBox 将 Termux 构建的 **Node.js 24（bionic 原生编译）** 打包进 App，形成一个自包含的 Node 运行时容器。App 本体极薄：**原生侧只有三个按钮（启动后端 / 打开 Web 前端 / 开源许可），全部运行能力都在内置的 H5 控制台里**——远程终端、进程管理、文件管理，经 WebSocket 打到本机 WebServer，由统一的进程引擎执行。
 
 - 📦 **零外部依赖**：Node 运行时随 APK 分发，双 ABI（arm64-v8a / x86_64），约 73 MB
 - 🖥️ **H5 控制台**：浏览器访问 `http://127.0.0.1:38080/`，终端 / 进程 / 文件一站管理
@@ -22,13 +22,14 @@ NodeJsBox 将 Termux 构建的 **Node.js 24（bionic 原生编译）** 打包进
 NodeJsBox/
 ├── app/src/main/
 │   ├── java/com/nodejsbox/container/
-│   │   ├── MainActivity / FilePickerActivity      入口薄壳（两按钮 + adb --es run + SAF 中转）
+│   │   ├── MainActivity / FilePickerActivity      入口薄壳（三按钮 + adb --es run + SAF 中转）
 │   │   ├── core/     NodeRuntime / RuntimeManager / WebServer / BridgeServer
 │   │   │             ContainerBootstrap / ContainerService / Diag
 │   │   ├── bridge/   BridgeDispatcher / ProcCommands / FileCommands（脚本侧命令域）
 │   │   ├── provider/ FilesDocumentsProvider（数据目录对外浏览）
 │   │   └── ui/       WebPanelActivity（Dialog 主题 WebView）
 │   ├── assets/       web/index.html（H5 前端）· scripts/（内置脚本）· modules/（nodejsbox.js）
+│   │                 licenses/（内置运行时许可告知 + Node.js LICENSE 全文）
 │   └── jniLibs/      node 本体 + 依赖 .so（构建产物，不入库）
 └── tools/            PC 侧构建 / 装机 / 自检脚本（Node.js，见「快速开始」）
 ```
@@ -92,6 +93,8 @@ node tools/install-selftest.cjs             # ③ 端到端自检（真实进程
 - **常驻终端**：输入命令回车执行，输出实时滚动；附着进程运行中输入直接写其 stdin
 - **临时终端**：附着某个进程，回放历史输出 + 实时流式 + 可输入
 
+顶栏另有「开源许可」按钮，直接展示内置运行时的来源告知与 Node.js LICENSE 全文（见下文「运行时来源与许可证」）。
+
 WebSocket 协议（一条消息一行 JSON）：
 
 ```jsonc
@@ -105,7 +108,7 @@ WebSocket 协议（一条消息一行 JSON）：
 {"event":"exit","id":"…","code":0}
 ```
 
-命令域：`shell.run` / `proc.list` / `proc.attach` / `proc.detach` / `proc.input` / `proc.kill` / `proc.signal` / `fs.list` / `fs.read` / `fs.write` / `fs.mkdir` / `fs.delete` / `fs.rename`。
+命令域：`shell.run` / `proc.list` / `proc.attach` / `proc.detach` / `proc.input` / `proc.kill` / `proc.signal` / `fs.list` / `fs.read` / `fs.write` / `fs.mkdir` / `fs.delete` / `fs.rename` / `licenses.read`。
 
 > H5 终端里的 `npm` / `npx` 会被自动改写为 `node <npm-cli.js> …`（npm 无二进制，需先跑 `tools/install-npm.cjs` 安装）。
 
@@ -210,6 +213,31 @@ await box.fs.listFiles({ dir: 'scripts' });
 - WebServer：多会话终端共享附着、文件上传 / 下载（当前限 512KB 文本）
 
 ---
+
+## 运行时来源与许可证
+
+**内置的 Node 运行时不是本项目自研或交叉编译的**：`app/src/main/jniLibs/<abi>/` 下的 10 个 `.so` 取自 **Termux 官方 apt 仓库**预编译的 deb 包（`tools/fetch-termux-deps.cjs` 下载、`tools/assemble-runtime.cjs` 解包并按 Android 命名规则重命名，仅改 SONAME、不改代码）。
+
+- apt 仓库：https://packages.termux.dev/apt/termux-main
+- Termux 工程：https://github.com/termux/termux-app · https://github.com/termux/termux-packages
+
+各组件沿用自己的上游许可，**均为宽松许可、不含 copyleft**：
+
+| .so | 组件 | 版本 | 许可证 |
+|---|---|---|---|
+| `libnode.so` | Node.js | 24.18.0 | MIT |
+| `libssl3.so` / `libcrypto3.so` | OpenSSL | 3.6.3 | Apache License 2.0 |
+| `libicu*.so` | ICU (Unicode) | 78.3 | Unicode License（BSD 风格） |
+| `libz1.so` | zlib | 1.3.2 | zlib License |
+| `libcares.so` | c-ares | 1.34.8 | MIT |
+| `libsqlite3.so` | SQLite | 3.53.4 | Public Domain |
+| `libc++_shared.so` | libc++（NDK C++ 标准库） | 29 | Apache License 2.0 + LLVM Exception |
+
+说明：
+
+- Node.js 自带的 V8 / libuv / zlib / c-ares / ICU 等组件，许可全文统一收录在 Node 的 `LICENSE` 里，本项目原样随包分发（`app/src/main/assets/licenses/node-LICENSE.txt`）。
+- 不在 Node LICENSE 内的组件（OpenSSL / SQLite / libc++ / c-ares）按上表各自许可分发；宽松许可的唯一义务是**保留版权与许可声明**，因此 App 主界面与 H5 控制台都提供「开源许可」入口，原文可读。
+- Termux 的终端模拟器应用按 GPL v3 发布，本项目**未使用其任何代码**，仅以 termux 仓库作为上游二进制的下载来源；打包脚本本身按 BSD-3-Clause 发布，同样未包含在内。
 
 ## Contributing
 

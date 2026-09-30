@@ -2,13 +2,13 @@
 /**
  * 组装 Node 运行时（解包 .deb → ELF 补丁 → 生成 app/src/main/jniLibs/<abi>/）
  *
- * 作者: GLM-5.3
- * 日期: 2026-09-01
+ * 作者: GLM-5.3，Qwen-3.8，等。
  *
  * 用法:
  *   node tools/assemble-runtime.cjs                      处理两个架构
  *   node tools/assemble-runtime.cjs --arch x86_64        只处理 x86_64
  *   node tools/assemble-runtime.cjs --fresh              删除 _extract 后重新解包
+ *   node tools/assemble-runtime.cjs --skip-license       不联网，沿用现有 assets/licenses/node-LICENSE.txt
  *
  * 做什么:
  *   1. 解包 _runtime_src/<arch>/*.deb（bsdtar 直接支持 ar/deb 格式）
@@ -21,14 +21,19 @@
  *      文件名同步改为 lib<名>.so。
  *   4. 依赖闭包校验：每个 NEEDED 必须命中【产物集合 ∪ 系统 bionic 库】
  *   5. （可选）llvm-readelf 交叉验证（找到 NDK 时自动执行）
+ *   6. 同步 node LICENSE：按随包 node 版本从 nodejs/node 的 v<版本号> 标签拉取
+ *      LICENSE 全文写入 assets/licenses/node-LICENSE.txt（宽松许可的「保留声明」义务，
+ *      随包 node 升级时这里自动跟随；离线用 --skip-license）。
  *
  * 产物: app/src/main/jniLibs/{arm64-v8a,x86_64}/libnode.so + 9 个依赖库
+ *       app/src/main/assets/licenses/node-LICENSE.txt（与随包 node 版本一致）
  */
 
 'use strict';
 
 const fs = require('node:fs');
 const path = require('node:path');
+const https = require('node:https');
 const { spawnSync } = require('node:child_process');
 
 // ----------------------------- 配置 -----------------------------
@@ -48,6 +53,11 @@ const ROOT = findProjectRoot(__dirname);
 const SRC_DIR = path.join(ROOT, '_runtime_src');
 const EXTRACT_DIR = path.join(SRC_DIR, '_extract');
 const JNILIBS_DIR = path.join(ROOT, 'app', 'src', 'main', 'jniLibs');
+
+// node LICENSE 随包同步：产物落在 assets/licenses/（「开源许可」入口读取处）
+const LICENSE_DIR = path.join(ROOT, 'app', 'src', 'main', 'assets', 'licenses');
+const LICENSE_OUT = path.join(LICENSE_DIR, 'node-LICENSE.txt');
+const LICENSE_URL = (ver) => `https://raw.githubusercontent.com/nodejs/node/v${ver}/LICENSE`;
 
 // Termux usr 前缀（deb 内路径）
 const PREFIX = 'data/data/com.termux/files/usr';
@@ -255,6 +265,83 @@ function readelfDynamic(file) {
   return { needed, soname };
 }
 
+// ----------------------------- node LICENSE 同步 -----------------------------
+
+/** 从 _runtime_src/<arch>/ 的 nodejs-lts_*.deb 文件名解析 node 语义版本（X.Y.Z）；取任一架构命中即可 */
+function detectNodeVersion() {
+  for (const arch of Object.keys(ARCH_MAP)) {
+    const debDir = path.join(SRC_DIR, arch);
+    if (!fs.existsSync(debDir)) continue;
+    const hit = fs.readdirSync(debDir).find(f => f.startsWith('nodejs-lts_') && f.endsWith('.deb'));
+    if (hit) {
+      const m = hit.match(/(\d+\.\d+\.\d+)/); // 容忍 epoch/revision（如 24.18.0-1）
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
+/** GET 文本，自动跟随重定向（最多 5 跳），非 200 抛错 */
+function httpGetText(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'user-agent': 'nodejsbox-tool4' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirects >= 5) return reject(new Error(`重定向超过 5 跳: ${url}`));
+        return resolve(httpGetText(new URL(res.headers.location, url).href, redirects + 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode} ← ${url}`)); }
+      const chunks = [];
+      res.on('data', d => chunks.push(d));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(20000, () => req.destroy(new Error('请求超时 20s')));
+  });
+}
+
+/**
+ * 按随包 node 版本拉取官方 LICENSE 写入 assets/licenses/node-LICENSE.txt。
+ * 失败降级：已有本地文件 → 警告沿用；无本地文件 → 硬失败（避免发布包缺声明）。
+ */
+async function syncNodeLicense({ skipLicense }) {
+  log('==== 同步 node LICENSE ====');
+  if (skipLicense) { log('--skip-license：跳过联网，沿用现有 assets/licenses/node-LICENSE.txt'); return; }
+  const ver = detectNodeVersion();
+  if (!ver) { warn('未从 _runtime_src 解析到 node 版本（deb 未就位？），跳过 LICENSE 同步'); return; }
+  log(`检测到随包 node v${ver}，拉取: ${LICENSE_URL(ver)}`);
+
+  let text;
+  try {
+    text = await httpGetText(LICENSE_URL(ver));
+  } catch (e) {
+    if (fs.existsSync(LICENSE_OUT)) { warn(`拉取失败（${e.message}）：沿用已存在的 node-LICENSE.txt，发布前请人工核对版本`); return; }
+    fail(`拉取 node LICENSE 失败且本地无备份：${e.message}\n` +
+         `  手动下载后重试：${LICENSE_URL(ver)} → ${LICENSE_OUT}（或临时加 --skip-license）`);
+  }
+
+  // 内容健全性校验：过短或缺少 Node 许可起始行 → 判为异常，不覆盖已有好文件
+  if (text.length < 20000 || !text.includes('Node.js is licensed for use as follows')) {
+    fail(`拉取内容不像 node LICENSE（长度 ${text.length}），已中止不写盘`);
+  }
+
+  fs.mkdirSync(LICENSE_DIR, { recursive: true });
+  const prev = fs.existsSync(LICENSE_OUT) ? fs.readFileSync(LICENSE_OUT, 'utf8') : '';
+  if (prev === text) {
+    log('node-LICENSE.txt 已是最新（与远端一致）');
+  } else {
+    fs.writeFileSync(LICENSE_OUT, text);
+    log(`已写入 node-LICENSE.txt（${(text.length / 1024).toFixed(0)} KB，${prev ? '内容更新' : '首次生成'}）`);
+  }
+
+  // 提醒：notices.txt 里硬编码了组件版本表，node 版本变了要去改
+  const notices = path.join(LICENSE_DIR, 'notices.txt');
+  if (fs.existsSync(notices) && !fs.readFileSync(notices, 'utf8').includes(ver)) {
+    warn(`注意：notices.txt 未包含 node 版本 ${ver}，若为升级请同步更新其中的版本表`);
+  }
+}
+
 // ----------------------------- 主流程 -----------------------------
 
 function processArch(arch, { fresh }) {
@@ -354,22 +441,28 @@ function processArch(arch, { fresh }) {
 
 function main() {
   const fresh = process.argv.includes('--fresh');
+  const skipLicense = process.argv.includes('--skip-license');
   let archs = Object.keys(ARCH_MAP);
   const i = process.argv.indexOf('--arch');
   if (i !== -1 && process.argv[i + 1]) archs = [process.argv[i + 1]];
 
-  let all = [];
-  for (const a of archs) all = all.concat(processArch(a, { fresh }));
+  (async () => {
+    let all = [];
+    for (const a of archs) all = all.concat(processArch(a, { fresh }));
 
-  log('');
-  log('==== 全部完成 ====');
-  log(`输出目录: ${JNILIBS_DIR}`);
-  // 16KB 对齐提示（Android 15+ 16KB 页设备需要 LOAD 段 16KB 对齐）
-  const badAlign = all.filter(r => r.align < 16384 && r.align > 0);
-  if (badAlign.length) {
-    warn(`提示: ${badAlign.length} 个产物 LOAD 段对齐为 4KB（Termux 当前按 4KB 构建）。`);
-    warn('      4KB 页设备（绝大多数现役手机/模拟器）完全没问题；16KB 页设备（Android 15+ 少数新机型）不兼容。');
-  }
+    // jniLibs 组装成功后，同步随包 node 的官方 LICENSE（联网失败按降级策略处理，不阻断已完成的组装）
+    await syncNodeLicense({ skipLicense });
+
+    log('');
+    log('==== 全部完成 ====');
+    log(`输出目录: ${JNILIBS_DIR}`);
+    // 16KB 对齐提示（Android 15+ 16KB 页设备需要 LOAD 段 16KB 对齐）
+    const badAlign = all.filter(r => r.align < 16384 && r.align > 0);
+    if (badAlign.length) {
+      warn(`提示: ${badAlign.length} 个产物 LOAD 段对齐为 4KB（Termux 当前按 4KB 构建）。`);
+      warn('      4KB 页设备（绝大多数现役手机/模拟器）完全没问题；16KB 页设备（Android 15+ 少数新机型）不兼容。');
+    }
+  })().catch(e => fail(e && e.message ? e.message : String(e)));
 }
 
 main();

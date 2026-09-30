@@ -12,13 +12,53 @@ android {
         minSdk 26
         targetSdk 35
         versionCode 2
-        versionName "0.2.0"
+        versionName "0.3.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // release 签名：凭证放 local.properties（已被 .gitignore 排除），不入库
+    def keystoreProps = new Properties()
+    def keystorePropsFile = rootProject.file("local.properties")
+    if (keystorePropsFile.exists()) {
+        // 按 UTF-8 读：Properties.load(InputStream) 是 ISO-8859-1，路径含中文会变乱码
+        keystorePropsFile.withReader("UTF-8") { keystoreProps.load(it) }
+    }
+    signingConfigs {
+        release {
+            storeFile keystoreProps.getProperty("RELEASE_STORE_FILE") ?
+                file(keystoreProps.getProperty("RELEASE_STORE_FILE")) : null
+            storePassword keystoreProps.getProperty("RELEASE_STORE_PASSWORD")
+            keyAlias keystoreProps.getProperty("RELEASE_KEY_ALIAS")
+            keyPassword keystoreProps.getProperty("RELEASE_KEY_PASSWORD")
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            if (keystoreProps.getProperty("RELEASE_STORE_FILE")) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    // 按 ABI 分包 + 通用包：assembleRelease 默认同时产出
+    // arm64-v8a / x86_64 两个单架构 APK + 一个双架构通用包（-all）
+    // （传 -PskipUniversalApk 可跳过通用包，只要两个单架构包）
+    splits {
+        abi {
+            enable true
+            reset()                      // 清空 AGP 默认 ABI 列表，只保留下面 include 的
+            include "arm64-v8a", "x86_64"
+            universalApk !project.hasProperty("skipUniversalApk")
+        }
+    }
+
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach { output ->
+            def abi = output.getFilter(com.android.build.OutputFile.ABI) ?: "all"
+            def suffix = variant.buildType.name == "release" ? "" : "-" + variant.buildType.name
+            outputFileName = "nodejsbox-v${defaultConfig.versionName}-${abi}${suffix}.apk"
         }
     }
 
