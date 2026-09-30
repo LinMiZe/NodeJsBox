@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NodeJsBox · Web 控制台</title>
+<style>
+  :root { --bg:#0b1220; --panel:#121a2b; --line:#233047; --fg:#dbe7ff; --dim:#7d93b8; --acc:#4da3ff; --ok:#3fd38a; --warn:#ffb454; --err:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.5 system-ui, monospace; }
+  header { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 8px 0 0; }
+  #status { font-size:12px; color:var(--dim); }
+  #status.on { color:var(--ok); } #status.off { color:var(--err); }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:10px; padding:10px; }
+  @media (max-width:760px){ main{ grid-template-columns:1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; display:flex; flex-direction:column; min-height:200px; margin-bottom:10px; }
+  .title { padding:6px 10px; border-bottom:1px solid var(--line); font-weight:bold; display:flex; align-items:center; gap:8px; }
+  .title small { color:var(--dim); font-weight:normal; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar { display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--line); align-items:center; flex-wrap:wrap; }
+  .bar input[type=text] { flex:1; min-width:120px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:5px; padding:5px 8px; font:inherit; }
+  button { background:var(--bg); color:var(--acc); border:1px solid var(--line); border-radius:5px; padding:5px 10px; font:inherit; cursor:pointer; }
+  button:active { filter:brightness(1.4); }
+  button.danger { color:var(--err); }
+  .list { overflow:auto; max-height:260px; }
+  .row { display:flex; gap:8px; padding:5px 10px; border-bottom:1px solid var(--line); align-items:center; cursor:pointer; }
+  .row:hover { background:#182238; }
+  .row.sel { background:#1c2b4a; }
+  .row .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .meta { color:var(--dim); font-size:11px; white-space:nowrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--dim); margin-right:4px; }
+  .dot.run { background:var(--ok); }
+  .termout { flex:1; overflow:auto; padding:8px 10px; white-space:pre-wrap; word-break:break-all; font:12px/1.45 monospace; min-height:140px; max-height:46vh; }
+  .termout .err { color:var(--err); } .termout .sys { color:var(--warn); } .termout .echo { color:var(--acc); }
+  .hint { color:var(--dim); padding:6px 10px; font-size:11px; }
+  dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; width:min(680px,92vw); max-height:80vh; padding:0; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  dialog .bar { margin:0; }
+  #edit { width:100%; height:52vh; background:var(--bg); color:var(--fg); border:0; padding:10px; font:12px/1.5 monospace; resize:vertical; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NodeJsBox · Web 控制台</h1>
+  <button onclick="connect()">重连</button>
+  <span id="status" class="off">未连接</span>
+</header>
+<main>
+  <div>
+    <!-- 文件查看器 -->
+    <section id="files">
+      <div class="title">文件</div>
+      <div class="bar">
+        <input type="text" id="fpath" placeholder="路径：空=沙箱根 · 相对=files/内 · 绝对=/data/data/…" onkeydown="if(event.key==='Enter')ls()">
+        <button onclick="ls()">列出</button>
+        <button onclick="up()">↑上级</button>
+        <button onclick="newFile()">新建文件</button>
+        <button onclick="mkdir()">新建目录</button>
+      </div>
+      <div class="list" id="flist"></div>
+    </section>
+
+    <!-- 进程查看器 -->
+    <section id="proc">
+      <div class="title">进程</div>
+      <div class="bar">
+        <button onclick="ps()">刷新</button>
+        <button onclick="openWatch()">查看输出→临时终端</button>
+        <button class="danger" onclick="killSelected()">停止</button>
+        <button onclick="sigSelected()">Ctrl+C</button>
+      </div>
+      <div class="list" id="plist"></div>
+      <div class="hint">点行选中；「查看输出」在下方临时终端附着该进程（历史+实时）</div>
+    </section>
+  </div>
+  <div>
+    <!-- 常驻终端：输入命令→执行→流式输出；每条命令的进程退出后仍保持附着（标题不丢） -->
+    <section id="term">
+      <div class="title">终端 <small id="sh-title"></small></div>
+      <div class="termout" id="sh-out"></div>
+      <div class="bar">
+        <input type="text" id="sh-in" placeholder="输入命令回车执行；附着进程运行中输入即写入其 stdin" onkeydown="if(event.key==='Enter')shSend()">
+        <button onclick="shSend()">执行</button>
+      </div>
+    </section>
+
+    <!-- 临时终端：进程查看器点「查看输出」后附着某个进程 -->
+    <section id="watch">
+      <div class="title">临时终端 <small id="w-title"></small> <span style="flex:1"></span><button onclick="wClose()">关闭附着</button></div>
+      <div class="termout" id="w-out"><div class="hint">在进程查看器里点选进程 →「查看输出→临时终端」</div></div>
+      <div class="bar">
+        <input type="text" id="w-in" placeholder="写入该进程 stdin（回车发送）" onkeydown="if(event.key==='Enter')wSend()">
+        <button onclick="wSend()">发送</button>
+        <button onclick="wSig()">Ctrl+C</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- 文件查看/编辑弹窗 -->
+<dialog id="dlg">
+  <div class="bar">
+    <input type="text" id="dpath" readonly style="flex:1">
+    <button onclick="saveFile()">保存</button>
+    <button class="danger" onclick="delFile()">删除</button>
+    <button onclick="dlg.close()">关闭</button>
+  </div>
+  <textarea id="edit" spellcheck="false"></textarea>
+</dialog>
+
+<script>
+// ---------------- WebSocket 客户端 ----------------
+let ws = null, seq = 0, curDir = "";
+const pending = new Map(); // seq -> {res,rej}
+const watchers = new Map(); // 实例 id -> [cb]（多个终端面板各自独立订阅同一 id）
+
+function connect() {
+  if (ws) { ws.onclose = null; ws.close(); }
+  ws = new WebSocket("ws://" + location.host + "/ws");
+  ws.onopen = () => { setStatus("已连接", "on"); shLine("已连接后端", "sys"); ls(); ps(); };
+  ws.onclose = () => { setStatus("断开，3s 后重连", "off"); shLine("连接断开，自动重连…", "sys"); setTimeout(connect, 3000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.event) { (watchers.get(m.id) || []).forEach(cb => cb(m)); return; }
+    const p = pending.get(m.seq);
+    if (p) { pending.delete(m.seq); m.ok ? p.res(m.data ?? m) : p.rej(new Error(m.error || "命令失败")); }
+  };
+}
+function call(cmd, args = {}) {
+  return new Promise((res, rej) => {
+    if (!ws || ws.readyState !== 1) return rej(new Error("未连接"));
+    const s = ++seq;
+    pending.set(s, { res, rej });
+    ws.send(JSON.stringify({ seq: s, cmd, args }));
+  });
+}
+function setStatus(txt, cls) { const el = document.getElementById("status"); el.textContent = txt; el.className = cls; }
+
+// 面板输出工具（每个终端面板一套，互不干扰）
+function mkPanel(outId, titleId) {
+  const el = document.getElementById(outId);
+  return {
+    line(s, cls) {
+      const d = document.createElement("div");
+      if (cls) d.className = cls;
+      d.textContent = s;
+      el.appendChild(d);
+      while (el.children.length > 3000) el.removeChild(el.firstChild); // 行数封顶防卡顿
+      el.scrollTop = el.scrollHeight;
+    },
+    title(s) { document.getElementById(titleId).textContent = s ? "· 附着: " + s : ""; },
+    clear() { el.innerHTML = ""; },
+  };
+}
+// 订阅某实例的流式事件（面板各自登记，关闭时解订）
+function onProc(id, cb) { if (!watchers.has(id)) watchers.set(id, []); watchers.get(id).push(cb); }
+function offProc(id, cb) {
+  const arr = watchers.get(id); if (!arr) return;
+  const i = arr.indexOf(cb); if (i >= 0) arr.splice(i, 1);
+  if (!arr.length) { watchers.delete(id); call("proc.detach", { id }).catch(() => {}); } // 无人看了才解订
+}
+// proc.attach 响应 = {targets:[{id,lines}]}（多目标格式）→ 取第一个目标的历史行
+function attachLines(r) { return (r.targets && r.targets[0] && r.targets[0].lines) || []; }
+
+// ---------------- 常驻终端 ----------------
+const sh = mkPanel("sh-out", "sh-title");
+let shPid = null; // 当前附着（= 最近一条命令）的实例 id；退出后仍保持，标题不丢
+async function shSend() {
+  const inp = document.getElementById("sh-in");
+  const text = inp.value; inp.value = "";
+  if (!text.trim()) return;
+  if (shPid && watchers.has(shPid)) {
+    // 上一条命令的进程还在跑：输入进它的 stdin
+    sh.line("> " + text, "echo");
+    try {
+      await call("proc.input", { id: shPid, text });
+    } catch (e) {
+      // 进程恰好已退出（exit 事件可能还没到）：降级为新命令重新执行
+      sh.line("! " + e.message + "（改作新命令执行）", "err");
+      offProc(shPid, shHandler); shPid = null;
+      shSend0(text);
+    }
+    return;
+  }
+  shSend0(text);
+}
+async function shSend0(text) {
+    sh.line("$ " + text, "echo");
+    const prev = shPid;
+    const r = await call("shell.run", { cmd: text });
+    shPid = r.id;
+    sh.title(shPid + (r.pid ? " pid=" + r.pid : ""));
+    if (prev) offProc(prev, shHandler);
+    onProc(shPid, shHandler); // 先登记再 attach：即使补历史失败也不丢后续事件
+    try {
+      const a = await call("proc.attach", { id: shPid, tail: 0 });
+      attachLines(a).forEach(l => sh.line(l));
+    } catch (e) { sh.line("! attach: " + e.message, "err"); }
+}
+function shHandler(m) {
+  if (m.event === "out") sh.line(m.line);
+  else if (m.event === "exit") {
+    sh.line("---- 进程退出 code=" + m.code + " ----", "sys");
+    offProc(m.id, shHandler); // 解订后 watchers 里没有 shPid，下次输入即新命令而非 stdin
+  }
+}
+
+// ---------------- 临时终端（进程观察） ----------------
+const w = mkPanel("w-out", "w-title");
+let wPid = null;
+async function openWatch() {
+  if (!selId) { w.line("! 先在进程列表点选一行", "err"); return; }
+  await wAttach(selId);
+}
+async function wAttach(id) {
+  if (wPid && wPid !== id) offProc(wPid, wHandler);
+  wPid = id;
+  w.title(id + " · " + procName(id));
+  w.clear();
+  onProc(id, wHandler);
+  try {
+    const a = await call("proc.attach", { id, tail: 300 });
+    const lines = attachLines(a);
+    lines.forEach(l => w.line(l));
+    w.line("==== 已附着 " + id + "（历史 " + lines.length + " 行，实时刷新）====", "sys");
+  } catch (e) { w.line("! " + e.message, "err"); }
+}
+function wHandler(m) {
+  if (m.event === "out") w.line(m.line);
+  else if (m.event === "exit") w.line("---- 进程退出 code=" + m.code + " ----", "sys");
+}
+async function wSend() {
+  const inp = document.getElementById("w-in");
+  const text = inp.value; inp.value = "";
+  if (!wPid || !text.trim()) return;
+  try { w.line("> " + text, "echo"); await call("proc.input", { id: wPid, text }); }
+  catch (e) { w.line("! " + e.message, "err"); }
+}
+async function wSig() {
+  if (!wPid) return;
+  try { await call("proc.signal", { id: wPid }); w.line("! 已发送 Ctrl+C", "sys"); }
+  catch (e) { w.line("! " + e.message, "err"); }
+}
+function wClose() {
+  if (wPid) offProc(wPid, wHandler);
+  wPid = null; w.title("");
+  w.clear();
+  w.line("（附着已关闭）", "sys");
+}
+
+// ---------------- 进程查看器 ----------------
+let selId = null, lastProcRow = null;
+const procInfos = new Map(); // id -> info（标题用）
+function procName(id) { const i = procInfos.get(id); return i ? " " + i.name : ""; }
+async function ps() {
+  try {
+    const r = await call("proc.list");
+    procInfos.clear();
+    const el = document.getElementById("plist"); el.innerHTML = "";
+    for (const i of r.instances) {
+      procInfos.set(i.id, i);
+      const row = mkRow(i.id + "  ·  " + i.name,
+        (i.pid ? "pid=" + i.pid + "  " : "") + (i.running ? "运行中" : "已退出" + (i.lastExitCode ?? "")));
+      row.querySelector(".name").prepend(dot(i.running));
+      row.onclick = () => selectProc(row, i.id);
+      el.appendChild(row);
+    }
+    if (!r.instances.length) el.innerHTML = "<div class='hint'>（没有进程实例）</div>";
+  } catch (e) { sh.line("! proc.list: " + e.message, "err"); }
+}
+function selectProc(row, id) {
+  if (lastProcRow) lastProcRow.classList.remove("sel");
+  row.classList.add("sel"); lastProcRow = row; selId = id;
+}
+function dot(run) { const d = document.createElement("span"); d.className = "dot" + (run ? " run" : ""); return d; }
+async function killSelected() {
+  if (!selId) return sh.line("! 先点选进程", "err");
+  try { await call("proc.kill", { id: selId }); sh.line("已请求停止 " + selId, "sys"); setTimeout(ps, 500); }
+  catch (e) { sh.line("! " + e.message, "err"); }
+}
+async function sigSelected() {
+  if (!selId) return sh.line("! 先点选进程", "err");
+  try { await call("proc.signal", { id: selId }); sh.line("已发送 Ctrl+C " + selId, "sys"); }
+  catch (e) { sh.line("! " + e.message, "err"); }
+}
+
+// ---------------- 文件查看器 ----------------
+function abs(rel) { return curDir ? curDir + "/" + rel : rel; }
+async function ls(path) {
+  const p = path ?? document.getElementById("fpath").value.trim(); // 空=沙箱根；相对=files/内；绝对=沙箱内任意
+  try {
+    const r = await call("fs.list", { path: p });
+    curDir = r.path ?? "";
+    document.getElementById("fpath").value = curDir;
+    const el = document.getElementById("flist"); el.innerHTML = "";
+    for (const e of r.entries) {
+      const row = mkRow((e.dir ? "📁 " : "📄 ") + e.name, fmtSize(e.size));
+      row.onclick = () => e.dir ? ls(abs(e.name)) : openFile(abs(e.name));
+      el.appendChild(row);
+    }
+    if (!r.entries.length) el.innerHTML = "<div class='hint'>（空目录）</div>";
+  } catch (e) { sh.line("! fs.list: " + e.message, "err"); }
+}
+function up() {
+  const i = curDir.lastIndexOf("/");
+  ls(i < 0 ? "" : curDir.slice(0, i));
+}
+function mkRow(name, meta) {
+  const d = document.createElement("div"); d.className = "row";
+  const n = document.createElement("span"); n.className = "name"; n.textContent = name;
+  const m = document.createElement("span"); m.className = "meta"; m.textContent = meta;
+  d.append(n, m); return d;
+}
+function fmtSize(s) { return s >= 1048576 ? (s / 1048576).toFixed(1) + "M" : s >= 1024 ? (s / 1024).toFixed(1) + "K" : s + "B"; }
+async function openFile(path) {
+  try {
+    const r = await call("fs.read", { path });
+    document.getElementById("dpath").value = path;
+    document.getElementById("edit").value = r.content;
+    document.getElementById("dlg").showModal();
+  } catch (e) { sh.line("! " + e.message, "err"); }
+}
+async function saveFile() {
+  const path = document.getElementById("dpath").value;
+  try { await call("fs.write", { path, content: document.getElementById("edit").value }); sh.line("已保存 " + path, "sys"); }
+  catch (e) { sh.line("! " + e.message, "err"); }
+}
+async function delFile() {
+  const path = document.getElementById("dpath").value;
+  if (!confirm("删除 " + path + " ？")) return;
+  try { await call("fs.delete", { path }); document.getElementById("dlg").close(); sh.line("已删除 " + path, "sys"); ls(curDir); }
+  catch (e) { sh.line("! " + e.message, "err"); }
+}
+async function newFile() {
+  const name = prompt("新建文件名（相对当前目录）");
+  if (!name) return;
+  try { await call("fs.write", { path: abs(name), content: "" }); ls(curDir); openFile(abs(name)); }
+  catch (e) { sh.line("! " + e.message, "err"); }
+}
+async function mkdir() {
+  const name = prompt("新建目录名（相对当前目录）");
+  if (!name) return;
+  try { await call("fs.mkdir", { path: abs(name) }); ls(curDir); }
+  catch (e) { sh.line("! " + e.message, "err"); }
+}
+
+connect();
+</script>
+</body>
+</html>

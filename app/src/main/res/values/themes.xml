@@ -3,4 +3,18 @@
     <style name="Theme.NodeJsBox" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:statusBarColor">#0F766E</item>
     </style>
+
+    <!-- FilePickerActivity：透明中转页（只负责调起 SAF，自身无 UI） -->
+    <style name="Theme.NodeJsBox.Translucent" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+
+    <!-- WebPanelActivity：弹窗式 Web 控制台（带标题栏，近全屏尺寸） -->
+    <style name="Theme.NodeJsBox.WebDialog" parent="Theme.AppCompat.DayNight.Dialog">
+        <item name="android:windowMinWidthMajor">100%</item>
+        <item name="android:windowMinWidthMinor">100%</item>
+    </style>
 </resources>

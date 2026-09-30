@@ -1,39 +1,64 @@
-package com.nodejsbox.container
+package com.nodejsbox.container.core
 
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import com.nodejsbox.container.MainActivity
+import com.nodejsbox.container.R
 
 /**
- * 运行时容器前台服务。
+ * 运行时容器前台服务（保活 + 汇总通知）。
  *
- *  - 有实例运行时保持前台（汇总通知：实例数 + id 列表），实例全部停止即自灭。
- *  - START_STICKY：进程被系统回收后服务重建，按 RuntimeManager.resume()
- *    恢复 restart=true 的在跑实例与 autostart=true 的实例。
+ *  - 有实例运行时保持前台（通知：实例数 + id 列表），实例全部停止即自灭；
+ *    自灭时复位保活标记，下次有实例启动会重新拉起。
+ *  - 保活入口 [ensureAlive]：由 NodeRuntime.spawn 在每次拉起进程前调用，
+ *    同一进程内只发一次 startForegroundService（除非服务已自灭）。
+ *    MainActivity 启动时注册 [ServiceHook]；未注册时 ensureAlive 为 no-op（仪器测试场景）。
+ *  - 通知刷新直接监听 RuntimeManager.addStateListener；实例全部是动态实例（dyn-*），
+ *    不跨重启恢复，由 H5 前端/脚本自行重新拉起。
  *  - 动作：
- *      ACTION_START   (extra id)  启动一个实例
- *      ACTION_STOP    (extra id)  停止一个实例
- *      ACTION_STOP_ALL            停止全部
+ *      ACTION_KEEPALIVE    拉起前台（无 extra，幂等）
+ *      ACTION_STOP_ALL     停止全部
  */
 class ContainerService : Service() {
 
     companion object {
-        const val ACTION_START = "com.nodejsbox.container.action.START"
-        const val ACTION_STOP = "com.nodejsbox.container.action.STOP"
+        const val ACTION_KEEPALIVE = "com.nodejsbox.container.action.KEEPALIVE"
         const val ACTION_STOP_ALL = "com.nodejsbox.container.action.STOP_ALL"
-        const val EXTRA_ID = "id"
         private const val CHANNEL_ID = "runtime"
         private const val NOTIF_ID = 1000
+
+        /** 拉起前台服务的注入钩子（Activity 层注册，避免 core 层反向依赖发起方） */
+        var ServiceHook: ((Context) -> Unit)? = null
+
+        @Volatile private var serviceLaunched = false
+
+        /** 确保前台服务已拉起（幂等；钩子未注册时静默跳过） */
+        fun ensureAlive(ctx: Context) {
+            if (serviceLaunched) return
+            val hook = ServiceHook ?: return
+            val app = ctx.applicationContext
+            serviceLaunched = true
+            hook(app)
+        }
+
+        /** 服务确认停止/自灭时复位，允许下次重新拉起 */
+        internal fun resetAlive() { serviceLaunched = false }
     }
 
     private var notifMgr: NotificationManager? = null
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private val stateListener = RuntimeManager.StateListener { mainHandler.post { refreshNotification() } }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,21 +70,26 @@ class ContainerService : Service() {
                 description = "Node.js 运行时容器状态"
             }
         )
-        RuntimeManager.addListener { refreshNotification() }
-        // sticky 重建 / 服务首次创建：恢复需要保活的实例
-        RuntimeManager.resume(this)
+        RuntimeManager.addStateListener(stateListener)
+        // 本地桥接服务（node 脚本 → 容器能力）；随 App 进程存活，不随服务停启——
+        // 运行中的 node 进程持有端口/token，中途换端口会使其失效
+        BridgeServer.ensureStarted(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // 立即满足前台服务义务（startForegroundService 调用后 5s 内必须 startForeground）
         startInForeground()
         when (intent?.action) {
-            ACTION_START -> intent.getStringExtra(EXTRA_ID)?.let { RuntimeManager.start(this, it) }
-            ACTION_STOP -> intent.getStringExtra(EXTRA_ID)?.let { RuntimeManager.stop(this, it) }
             ACTION_STOP_ALL -> RuntimeManager.stopAll(this)
         }
         refreshNotification()
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        RuntimeManager.removeStateListener(stateListener)
+        resetAlive()
+        super.onDestroy()
     }
 
     private fun startInForeground() {
@@ -75,6 +105,7 @@ class ContainerService : Service() {
         val running = RuntimeManager.runningIds()
         if (running.isEmpty()) {
             Log.i(NodeRuntime.TAG, "无运行实例，服务自灭")
+            resetAlive()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return

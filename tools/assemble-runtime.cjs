@@ -33,7 +33,18 @@ const { spawnSync } = require('node:child_process');
 
 // ----------------------------- 配置 -----------------------------
 
-const ROOT = __dirname;
+// 定位项目根：从本文件所在目录向上找含 settings.gradle 的目录（兼容仓库根 / tools/ 两种位置）。
+function findProjectRoot(startDir) {
+  let dir = path.resolve(startDir);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, 'settings.gradle'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.resolve(startDir);
+}
+const ROOT = findProjectRoot(__dirname);
 const SRC_DIR = path.join(ROOT, '_runtime_src');
 const EXTRACT_DIR = path.join(SRC_DIR, '_extract');
 const JNILIBS_DIR = path.join(ROOT, 'app', 'src', 'main', 'jniLibs');
@@ -222,8 +233,7 @@ function extractDeb(debPath, workDir, label) {
 function findReadelf() {
   const cands = [];
   if (process.env.NDK_HOME) cands.push(path.join(process.env.NDK_HOME, 'toolchains', 'llvm', 'prebuilt', 'windows-x86_64', 'bin', 'llvm-readelf.exe'));
-  const sdk = process.env.ANDROID_HOME;
-  if (!sdk) return null;
+  const sdk = (process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || fail('未设置 ANDROID_HOME'));
   const ndkRoot = path.join(sdk, 'ndk');
   if (fs.existsSync(ndkRoot)) {
     for (const v of fs.readdirSync(ndkRoot).sort().reverse()) {

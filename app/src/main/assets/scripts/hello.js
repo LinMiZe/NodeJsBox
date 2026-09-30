@@ -22,5 +22,11 @@ const timer = setInterval(() => {
 process.on('SIGTERM', () => {
   console.log('hello: SIGTERM 收到，优雅退出');
   clearInterval(timer);
-  process.exit(0);
+  setTimeout(() => process.exit(0), 200); // 留出管道刷写时间，避免退出日志丢失
+});
+
+process.on('SIGINT', () => {
+  console.log('hello: SIGINT 收到（Ctrl+C），优雅退出');
+  clearInterval(timer);
+  setTimeout(() => process.exit(0), 200); // 留出管道刷写时间，避免退出日志丢失
 });

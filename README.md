@@ -1,141 +1,220 @@
 # NodeJsBox
 
-[English](README.md) | [中文文档](README.zh-CN.md)
+[中文文档](README.md) | [English](README.en.md)
 
-A standalone, general-purpose **Node.js runtime container for Android**. It ships Termux's natively-compiled Node.js (bionic build) inside a regular APK — no root, no Termux app, no Linux environment required. Run any Node.js script directly on a device or emulator.
+> 在 Android 上直接运行 Node.js —— 不依赖 Termux / Linux 环境，把 Node 打进 APK 当容器用。
 
-- The container is script-agnostic: it knows nothing about what it runs.
-- Core concept: a **RunConfig** = script + args + env vars + policy. Each config launches one independent `node` process instance; multiple configs can run concurrently (even from the same script).
+NodeJsBox 将 Termux 构建的 **Node.js 24（bionic 原生编译）** 打包进 App，形成一个自包含的 Node 运行时容器。App 本体极薄：**原生侧只有两个按钮（启动后端 / 打开 Web 前端），全部运行能力都在内置的 H5 控制台里**——远程终端、进程管理、文件管理，经 WebSocket 打到本机 WebServer，由统一的进程引擎执行。
+
+- 📦 **零外部依赖**：Node 运行时随 APK 分发，双 ABI（arm64-v8a / x86_64），约 73 MB
+- 🖥️ **H5 控制台**：浏览器访问 `http://127.0.0.1:38080/`，终端 / 进程 / 文件一站管理
+- 🔌 **脚本侧桥接 API**：容器内 `require('nodejsbox')` 即可管理子进程、读写沙箱文件
+- 🧪 **内置自检**：`test-full.js` 全量回归，产出 HTML 报告
+- 📁 **沙箱可对外浏览**：DocumentsProvider，系统 / 第三方文件管理器可直达数据目录
+
+**License:** MIT · **最低版本:** Android 8.0（API 26）· **目标版本:** Android 15（API 35）
+
+---
+
+## 目录结构
 
 ```
-┌─ NodeJsBox container (com.nodejsbox.container, ~73 MB, dual ABI) ─────┐
-│                                                                       │
-│  configs.json (filesDir, user-editable)                               │
-│    └─ config: id / name / script / args / env / restart / autostart   │
-│                                                                       │
-│  MainActivity        config list UI: start/stop/logs/reload           │
-│  ContainerService    foreground service (dataSync): keep-alive        │
-│  RuntimeManager      multi-instance mgmt: proc table, log rotation,   │
-│                      crash auto-restart (exponential backoff)         │
-│  RunConfigs          config model + JSON persistence + asset unpack   │
-│  NodeRuntime         ProcessBuilder spawn of libnode.so               │
-│                                                                       │
-│  jniLibs/arm64-v8a/   (10 native libs)                                │
-│  jniLibs/x86_64/      (10 native libs)                                │
-│  assets/scripts/      selftest.js + hello.js (unpacked on first run)  │
-└───────────────────────────────────────────────────────────────────────┘
+NodeJsBox/
+├── app/src/main/
+│   ├── java/com/nodejsbox/container/
+│   │   ├── MainActivity / FilePickerActivity      入口薄壳（两按钮 + adb --es run + SAF 中转）
+│   │   ├── core/     NodeRuntime / RuntimeManager / WebServer / BridgeServer
+│   │   │             ContainerBootstrap / ContainerService / Diag
+│   │   ├── bridge/   BridgeDispatcher / ProcCommands / FileCommands（脚本侧命令域）
+│   │   ├── provider/ FilesDocumentsProvider（数据目录对外浏览）
+│   │   └── ui/       WebPanelActivity（Dialog 主题 WebView）
+│   ├── assets/       web/index.html（H5 前端）· scripts/（内置脚本）· modules/（nodejsbox.js）
+│   └── jniLibs/      node 本体 + 依赖 .so（构建产物，不入库）
+└── tools/            PC 侧构建 / 装机 / 自检脚本（Node.js，见「快速开始」）
 ```
 
-## Features
+依赖方向：`UI → core ← bridge`，单向无环。core 无状态总线：实例集合变化走 `RuntimeManager.StateListener`，逐行输出走 `RuntimeManager.LineListener`，两者互不依赖。
 
-| Capability | Description |
-|---|---|
-| Multi-instance | One instance per config; multiple configs (even pointing to the same script) run concurrently |
-| One-tap start/stop | UI buttons, or adb `--es start/stop <id>` |
-| Crash auto-restart | Instances with `restart:true` are restarted with exponential backoff (1s → 2s → … capped at 60s; counter resets after 60s of stable running; manual stops do not restart) |
-| Logs | Per-instance log file `filesDir/logs/<id>.log` (512 KB rotation to `.old`); logcat tag `NodeJsBox` with `[NB:<id>]` prefix; UI shows last 300 lines |
-| Service self-dismiss | The foreground service withdraws itself once all instances stop (no lingering notification) |
-| Reconnect recovery | Running instance ids are persisted; after a sticky service restart by the system, instances with `restart:true` and `autostart:true` are resumed |
-| Env injection | `LD_LIBRARY_PATH=nativeLibraryDir`, `HOME=filesDir`, `TMPDIR=cacheDir`; per-config `env` can override/append |
+---
 
-## Building from source
+## 快速开始
 
-Prerequisites: JDK 17, Android SDK (Gradle 8.14.3 / AGP 8.13.1), Node.js >= 18, `tar` (bsdtar, bundled with Windows 10+/most Linux).
+### 环境要求
 
-The native runtime is **not** committed to the repository — it is assembled from official Termux packages (`packages.termux.dev`) by the build tools:
+- **JDK 17+**、**Android SDK**（设置 `ANDROID_HOME` 环境变量）、**NDK**（提供 `llvm-readelf` 用于运行时校验）
+- **Node.js**（运行 `tools/` 下的脚本）
+- 一台 Android 设备或模拟器（arm64 / x86_64）
+
+### 构建并运行
 
 ```bash
-node tools/fetch-termux-deps.cjs --with-node   # download nodejs-lts + 6 dependency .deb (both ABIs)
-node tools/assemble-runtime.cjs                # unpack + ELF patch + generate app/src/main/jniLibs/
-./gradlew :app:assembleDebug                   # build the APK (on Windows: gradlew.bat)
-node tools/install-selftest.cjs                # install on a running emulator/device + self-test
+# 1) 下载 Node 运行时依赖（Termux deb，双架构）
+node tools/fetch-termux-deps.cjs --with-node
+
+# 2) 解包 + ELF 补丁 + 生成 jniLibs
+node tools/assemble-runtime.cjs
+
+# 3) 构建 APK
+./gradlew :app:assembleDebug
+
+# 4) 安装到设备并启动
+node tools/install-selftest.cjs
+
+# 5) 从 PC 拷入 npm（容器内 npm 是纯 JS CLI，无二进制；每次重装 APK 后需重跑）
+node tools/install-npm.cjs
+
+# 6) 端到端全量自检（装机 → --es run → 轮询结果标记 → 拉取实例日志佐证）
+node tools/install-selftest.cjs --script scripts/test-full.js
 ```
 
-To upgrade Node.js: download the new version via `tools/fetch-termux-deps.cjs`, re-run `tools/assemble-runtime.cjs`, and rebuild. Note that `libicu`'s SONAME major version must match what the node binary links against (currently 78.x).
+常用参数：`node tools/install-selftest.cjs --help` 查看全部选项（`--device` 指定设备、`--no-reinstall` 调试期快速复跑、`--timeout` 自检超时等）。
 
-## Usage
+> Windows 下把 `./gradlew` 换成 `gradlew.bat`。
 
-### UI
-Launch the app to see the config list. Each row shows name / script / policy / status with Start (Stop) and Log buttons; top bar has "Reload configs" and "Stop all".
-
-### adb (automation / headless)
+### 运行测试
 
 ```bash
-adb shell am start -n com.nodejsbox.container/.MainActivity --es start hello
-adb shell am start -n com.nodejsbox.container/.MainActivity --es stop  hello
-
-# instance logs
-adb logcat -s NodeJsBox
-adb shell run-as com.nodejsbox.container cat files/logs/hello.log
-
-# add your own script + config
-adb push my.js /data/local/tmp/my.js
-adb shell chmod 644 /data/local/tmp/my.js
-adb shell run-as com.nodejsbox.container cp /data/local/tmp/my.js files/scripts/my.js
-# then edit filesDir/configs.json and tap "Reload configs" in the app
+./gradlew :app:testDebugUnitTest            # ① JVM 单测（秒级，无需设备）
+./gradlew :app:connectedDebugAndroidTest    # ② 仪器测试（设备上真跑）
+node tools/install-selftest.cjs             # ③ 端到端自检（真实进程链）
 ```
 
-### configs.json format
+---
 
-```json
-{ "configs": [
-  { "id": "selftest", "name": "Runtime self-test", "script": "scripts/selftest.js",
-    "args": [], "env": {}, "restart": false, "autostart": false },
-  { "id": "hello", "name": "Heartbeat demo", "script": "scripts/hello.js",
-    "args": [], "env": {}, "restart": true, "autostart": false }
-] }
+## 使用方式
+
+### 1. H5 控制台（主路径）
+
+打开方式：主界面「打开 Web 前端」弹窗，或任意浏览器访问 `http://127.0.0.1:38080/`（仅回环监听，不对外网暴露）。单页四区块：
+
+- **文件查看器**：浏览 / 编辑 / 新建 / 删除 / 改名，范围为整个 App 沙箱
+- **进程查看器**：列出运行实例（含 pid），可停止 / Ctrl+C / 「查看输出 → 临时终端」
+- **常驻终端**：输入命令回车执行，输出实时滚动；附着进程运行中输入直接写其 stdin
+- **临时终端**：附着某个进程，回放历史输出 + 实时流式 + 可输入
+
+WebSocket 协议（一条消息一行 JSON）：
+
+```jsonc
+// 请求
+{"seq":1,"cmd":"shell.run","args":{"cmd":"ls -l"}}
+// 响应
+{"seq":1,"ok":true,"data":{ /* ... */ }}
+{"seq":1,"ok":false,"error":"..."}
+// 事件（需先 attach）
+{"event":"out","id":"dyn-sh-…","line":"…"}
+{"event":"exit","id":"…","code":0}
 ```
 
-- `script`: relative to `filesDir` or absolute; `args` are passed to node; `env` adds environment variables
-- `restart`: auto-restart on exit; `autostart`: auto-start when the service (re)starts
-- Multi-instance: duplicate a config with a different id (run N copies of the same script)
+命令域：`shell.run` / `proc.list` / `proc.attach` / `proc.detach` / `proc.input` / `proc.kill` / `proc.signal` / `fs.list` / `fs.read` / `fs.write` / `fs.mkdir` / `fs.delete` / `fs.rename`。
 
-## Technical highlights
+> H5 终端里的 `npm` / `npx` 会被自动改写为 `node <npm-cli.js> …`（npm 无二进制，需先跑 `tools/install-npm.cjs` 安装）。
 
-### ELF patching (why jniLibs contains names like `libcrypto3.so`)
-Android's installer only extracts jniLibs files matching `lib*.so` into `nativeLibraryDir`, and W^X only allows executing from there. Termux libraries carry version suffixes (`libcrypto.so.3`, …) that don't match. The fix: rewrite each ELF's `.dynstr` entries for `DT_NEEDED`/`DT_SONAME` in place (`libcrypto.so.3 → libcrypto3.so`, `libicuuc.so.78 → libicuuc78.so`, …). New names are ≤ old length, null-padded, no offset changes. Implemented in pure Node in `tools/assemble-runtime.cjs`, with dependency-closure validation and optional cross-validation via NDK `llvm-readelf`. Gradle must set `useLegacyPackaging = true` so `.so` files are extracted to disk (needed for exec).
+### 2. adb（自动化）
 
-### Runtime composition (per ABI: 10 native libs)
-Node.js LTS 24.18.0 (~43 MB) plus dependencies from Termux: openssl 3.6.3, libicu 78.3 (31.6 MB — the bulk; SONAME hard constraint 78.x), libc++ 29, c-ares 1.34.8, libsqlite 3.53.4, zlib 1.3.2. System libc/libm/libdl come from bionic. All libraries are 16 KB-aligned per Termux build conventions.
+```bash
+PKG=com.nodejsbox.container
+adb shell am start -n "$PKG/.MainActivity" --es run scripts/test-full.js   # 拉起并运行脚本
+adb shell run-as $PKG cat files/logs/<id>.log                               # 看实例日志
+adb shell run-as $PKG cat files/diag.log                                    # 看诊断日志
+```
 
-### Implementation notes
-- **Process isolation**: node is spawned via `ProcessBuilder`; a node crash never takes down the app process. stdout/stderr are merged and pumped line-by-line to the log file and logcat.
-- **singleTop**: `MainActivity` must use `launchMode="singleTop"`, otherwise `am start --es` extras are not delivered to `onNewIntent` when the activity is already on top.
-- **FGS compliance**: `onStartCommand` calls `startForeground` before handling the action (5-second rule); the service stops itself when no instance is running.
-- **Graceful stop**: `destroy()` sends SIGTERM first (scripts can clean up on SIGTERM), then `destroyForcibly()` after 3 seconds.
+`--es` 即 `am start` 的标准 extra 参数（`e`=extra，`s`=String 类型）。停止实例没有 adb 入口：走 H5 进程查看器，或桥接 `proc.stop`。
 
-## Known limitations
+### 3. 脚本侧桥接 API（`require('nodejsbox')`，零依赖，仅容器内可用）
 
-1. `os.cpus()` returns an empty array on Android (known quirk); rarely matters in practice.
-2. **Phantom Process Killer (Android 12+)**: persistent instances rely on the foreground service.
-3. arm64-v8a builds are assembled symmetrically with x86_64 but have not been verified on a physical arm64 device.
-4. Termux node's RUNPATH points to a nonexistent Termux prefix (harmless); `LD_LIBRARY_PATH` takes precedence.
-5. Auto-restart has no attempt cap (backoff caps at 60s); restart loops caused by script bugs need manual intervention.
-6. `adb shell am start --es ...` requires the activity to be visible; a broadcast receiver entry point could be added for fully background control.
+```js
+const box = require('nodejsbox');
 
-## Acknowledgements
+await box.app.info();                    // { nodeBin, filesDir, scripts, bridgePort }
+await box.app.toast('你好');
 
-- [Termux](https://termux.dev) — the bundled native runtime is assembled from Termux's official package builds ([termux-packages](https://github.com/termux/termux-packages), `packages.termux.dev`). No Termux app code is used.
-- [Node.js](https://nodejs.org)
+const ch = await box.proc.start({ script: 'scripts/test-echo.js', args: [], env: {}, restart: false });
+await box.proc.write(ch.id, 'hello');    // 注入子实例 stdin（自动补 \n）
+(await box.proc.log(ch.id, { tail: 50 })).lines;
+await box.proc.list();
+await box.proc.stop(ch.id);
 
-## Third-party components
+await box.fs.pick({ mime: 'text/*' });   // 系统文件管理器选文件 → 拷入 files/imports/
+await box.fs.export({ path: 'out.bin' }); // filesDir 内文件 → 用户选位置导出
+await box.fs.listFiles({ dir: 'scripts' });
+```
 
-The native libraries are builds of the upstream projects below and remain under their respective permissive licenses (no copyleft components):
+连接参数经环境变量 `NODEJSBOX_BRIDGE` / `NODEJSBOX_TOKEN` 自动注入。
 
-| Component | Upstream | License |
+---
+
+## 实例模型
+
+实例**全部是动态实例**（id 以 `dyn-` 开头），三个来源：
+
+| 前缀 | 来源 | id 规则 |
 |---|---|---|
-| node (LTS 24.x) | [Node.js](https://nodejs.org) | MIT |
-| libcrypto / libssl | [OpenSSL 3.x](https://www.openssl.org) | Apache-2.0 |
-| libicu* (78.x) | [ICU](https://icu.unicode.org) | ICU License (MIT-compatible) |
-| libz | [zlib](https://zlib.net) | zlib License |
-| libcares | [c-ares](https://c-ares.org) | MIT |
-| libsqlite3 | [SQLite](https://sqlite.org) | Public Domain |
-| libc++_shared | [LLVM libc++](https://libcxx.llvm.org) | Apache-2.0 with LLVM exception |
+| `dyn-sh-*` | H5 终端 shell.run | 每条命令一个进程 |
+| `dyn-script-<名>` | `--es run` / H5 运行脚本 | 按文件名固定，**重复启动幂等** |
+| `dyn-<uuid>` | 桥 `proc.start` | 每次全新 |
 
-If you redistribute this project (e.g. an APK built from it), keep the corresponding copyright and license notices.
+生命周期：
 
-> This project was developed in collaboration with an AI assistant (GLM). Design, direction, testing and maintenance are done by the maintainer.
+- 不持久化、**不跨重启恢复**——需保活的脚本由前端 / 脚本自行重新拉起，或 `restart=true` 进程内自动重启（指数退避 1s→2s→…→60s 封顶，稳定运行满 60s 重置；手动停止不重启）
+- 每个实例独立日志 `files/logs/<id>.log`（512KB 轮转 `.old`）+ logcat `[NB:<id>] <line>`
+- 有实例在跑 → 前台服务保活（`NodeRuntime.spawn` 自动触发）；实例全部停止 → 服务自灭
+
+## 内置脚本（`assets/scripts/` → `files/scripts/`）
+
+| 脚本 | 用途 |
+|---|---|
+| `hello.js` | 心跳演示（常驻 + stdin 回显） |
+| `test-echo.js` | stdin 回显，被 test-bridge / test-full 拉起验证 |
+| `test-bridge.js` | 桥接链路自检（`BRIDGE_RESULT` 标记） |
+| `test-full.js` | **全量自检**（HTML 报告 → `files/reports/test-full-latest.html`，`FULL_RESULT` 标记） |
+
+新增脚本只需放进 `assets/scripts/`，`ContainerBootstrap` 整目录递归解包（缺失才写、0 字节自愈、用户改过的不覆盖），H5 文件查看器直接可见。
+
+## 沙箱目录（`/data/data/com.nodejsbox.container/`）
+
+| 目录 | 用途 |
+|---|---|
+| `files/` | cwd = HOME；脚本 / 日志 / 报告 / 导入 |
+| `files/modules/` | 内置桥接模块（`NODE_PATH` 注入，升级覆盖） |
+| `files/lib/node_modules/npm/` | npm CLI（APK 不自带，跑 `tools/install-npm.cjs` 安装） |
+| `files/npm-global/`、`files/npm-cache/` | npm 全局安装 / 缓存（容器 env 已重定向） |
+| `cache/` | `os.tmpdir()`，临时文件 |
+| `files/diag.log` | 诊断日志 |
+
+---
+
+## 运行环境与能力边界
+
+容器内是 Termux 编译的 Node（bionic libc，非 glibc），与桌面 Node 存在差异。**核心结论**：纯 JS 类 Node 生态开箱即用（`npm` / `tsc` 实测通过）；自带原生二进制的工具（esbuild / rolldown native / node-gyp）在默认配置下不可用，但有绕过路线。
+
+关键约束：
+
+- **W^X**：targetSdk ≥ 29 只允许 exec `nativeLibraryDir/`；数据目录 spawn 二进制必 `EACCES`。绕过路线：jniLibs 打包原生库 / targetSdk 28 变体 / WASM 替代
+- **信号语义**：`Process.destroy()` 发的是 `SIGQUIT(3)` 而非 `SIGTERM`，容器已改用 `sendSignal(pid, 15)`；`sh` 包装 node 会吞信号，cmd 首 token 为 `node` 时直接 exec
+- **模块解析**：容器内自写脚本是 CommonJS（`.js` 无 `"type":"module"`）→ **禁止顶层 await**，异步包进 `async function main()`
+- **网络怪癖**：`os.cpus()` 返回空数组；`dns.resolve*` 直连 53 常被拒（`dns.lookup` 正常）；`npm` 默认 prefix 指向只读目录，容器已注入 `npm_config_prefix`/`npm_config_cache` 重定向
+- **存储**：sdcard 为 noexec，不能放需要 exec 的二进制；未授权时写 `/sdcard` 会 `EACCES`
+
+## 常见问题
+
+- **重装 APK 后 npm / 项目全没了？** 卸载重装 = 沙箱全清，需重跑 `tools/install-npm.cjs`。
+- **H5 显示与进程实际状态不一致？** 抓诊断日志：`adb shell run-as com.nodejsbox.container cat files/diag.log`（异常路径带 `W` 标记，先 `grep " W "`）。或 `adb logcat -s NodeJsBox.Diag`。
+- **常驻进程过几分钟无声消失？** 确认设备是否触发 Phantom Process Killer（Android 12+），自用设备可调大 `max_phantom_processes`。
+- **文件管理器看不到数据目录？** provider 需声明 `android.content.action.DOCUMENTS_PROVIDER` intent-filter（本项目已实现）。
+
+## 路线图
+
+- H5 桌面启动器能力（脚本网格 + 一键运行）
+- sdcard 工作区：「所有文件访问」授权 + node 直读直写 `/sdcard/NodeJsBox/`
+- Bridge 增强：proc 退出事件主动推送给脚本侧
+- WebServer：多会话终端共享附着、文件上传 / 下载（当前限 512KB 文本）
+
+---
+
+## Contributing
+
+欢迎 Issue 与 Pull Request。
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © NodeJsBox contributors

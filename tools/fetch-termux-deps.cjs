@@ -28,7 +28,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 
-const SRC_DIR = path.join(__dirname, '_runtime_src');
+// 定位项目根：从本文件所在目录向上找含 settings.gradle 的目录（兼容仓库根 / tools/ 两种位置）。
+function findProjectRoot(startDir) {
+  let dir = path.resolve(startDir);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, 'settings.gradle'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.resolve(startDir);
+}
+const SRC_DIR = path.join(findProjectRoot(__dirname), '_runtime_src');
 const REPO_BASE = 'https://packages.termux.dev/apt/termux-main';
 const ARCHS = ['aarch64', 'x86_64'];
 
